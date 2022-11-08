@@ -147,12 +147,15 @@ func NewFile() *File {
 	return &file
 }
 
+func getUserHash(username string) userlib.UUID {
+	return createUserUUID(username)
+}
+
 func InitUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User = *NewUser()
 	prevUUID := createUserUUID(username)
 	_, ok := userlib.DatastoreGet(prevUUID)
 	if ok != false {
-		fmt.Println("Username is already being used")
 		return nil, nil
 	} 
 	userdata.Username = username
@@ -173,19 +176,18 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 	prevUUID := createUserUUID(username)
 	data, ok := userlib.DatastoreGet(prevUUID)
 	if ok == false {
-		fmt.Println("Username is not registered")
 		return nil, nil
 	} 
 	var userData User
 	json.Unmarshal(data, &userData)
 	if userData.Password != password {
-		fmt.Println("Password is wrong")
 		return nil, nil
 	}
 	return &userData, nil
 }
 
 func (userdata *User) StoreFile(filename string, content []byte) (err error) {
+	userdata, _ = GetUser(userdata.Username, userdata.Password)
 	storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
 	if err != nil {
 		return err
@@ -198,17 +200,18 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 	userdata.OwnerByFile[filename] = userdata.Username
 	userdata.FilesByOriginalName[filename] = filename
 	userdata.Files[filename] = storageKey 
-	fmt.Println(userdata.OwnerByFile)
-	fmt.Println(userdata.FilesByOriginalName)
 	contentBytes, err := json.Marshal(newFile)
 	if err != nil {
 		return err
 	}
 	userlib.DatastoreSet(storageKey, contentBytes)
+	newUserData, _ := json.Marshal(userdata)
+	userlib.DatastoreSet(getUserHash(userdata.Username), newUserData)
 	return
 }
 
 func (userdata *User) AppendToFile(filename string, content []byte) error {
+	userdata, _ = GetUser(userdata.Username, userdata.Password)
 	fileOwnerName := userdata.OwnerByFile[filename]
 	if fileOwnerName == "" {
 		fileOwnerName = userdata.Username
@@ -230,10 +233,13 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 	}
 	contentBytes, err := json.Marshal(fileData)
 	userlib.DatastoreSet(storageKey, contentBytes)
+	newUserData, _ := json.Marshal(userdata)
+	userlib.DatastoreSet(getUserHash(userdata.Username), newUserData)
 	return nil
 }
 
 func (userdata *User) LoadFile(filename string) (content []byte, err error) {
+	userdata, _ = GetUser(userdata.Username, userdata.Password)
 	fileOwnerName := userdata.OwnerByFile[filename]
 	if fileOwnerName == "" {
 		fileOwnerName = userdata.Username
@@ -253,16 +259,21 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 	if !contains(foundFile.Collaborators, userdata.Username) {
 		return nil, errors.New(strings.ToTitle("Not authorized"))
 	}
-	fmt.Println("here")
+	newUserData, _ := json.Marshal(userdata)
+	userlib.DatastoreSet(getUserHash(userdata.Username), newUserData)
 	return content, err
 }
 
 func (userdata *User) CreateInvitation(filename string, recipientUsername string) (
 	invitationPtr uuid.UUID, err error) {
+	userdata, _ = GetUser(userdata.Username, userdata.Password)
+	userdataJSON, _ := userlib.DatastoreGet(createUserUUID(userdata.Username))
+	json.Unmarshal(userdataJSON, &userdata)
 	fileOwner := userdata.OwnerByFile[filename]
 	realFileName := userdata.FilesByOriginalName[filename]
 	filekey := userdata.Files[filename]
-	fmt.Println(filekey)
+
+	fmt.Println(userdata.Files)
 	var newInvitation Invitation
 	newInvitation.Sender = userdata.Username
 	newInvitation.IntendedRecipient = recipientUsername
@@ -272,16 +283,18 @@ func (userdata *User) CreateInvitation(filename string, recipientUsername string
 	invitationKey, _ := uuid.FromBytes(userlib.Hash([]byte(newInvitation.Sender + newInvitation.IntendedRecipient + filename))[:16])
 	data, _ := json.Marshal(newInvitation)
 	userlib.DatastoreSet(invitationKey, data)
+	newUserData, _ := json.Marshal(userdata)
+	userlib.DatastoreSet(getUserHash(userdata.Username), newUserData)
 	return invitationKey, nil
 }
 
 func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid.UUID, filename string) error {
+	userdata, _ = GetUser(userdata.Username, userdata.Password)
 	dataJSON, _ := userlib.DatastoreGet(invitationPtr)
 	var invitation Invitation 
 	json.Unmarshal(dataJSON, &invitation)
 	filekey := invitation.File
 	userdata.Files[filename] = filekey
-	fmt.Println(invitation)
 	userdata.FilesByOriginalName[filename] = invitation.Filename
 	// need to set the owner by file to the original owner
 	data, ok := userlib.DatastoreGet(filekey)
@@ -295,10 +308,13 @@ func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid
 	userdata.OwnerByFile[filename] = selectedFile.Owner
 	contentBytes, _ := json.Marshal(selectedFile)
 	userlib.DatastoreSet(filekey, contentBytes)
+	newUserData, _ := json.Marshal(userdata)
+	userlib.DatastoreSet(getUserHash(userdata.Username), newUserData)
 	return nil
 }
 
 func (userdata *User) RevokeAccess(filename string, recipientUsername string) error {
+	userdata, _ = GetUser(userdata.Username, userdata.Password)
 	fileOwner := userdata.OwnerByFile[filename]
 	if fileOwner == "" {
 		fileOwner = userdata.Username
@@ -327,9 +343,10 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 		}
 		toBeRemoved = toBeRemoved[1:]
 	}
-	fmt.Println("collabs", selectedFile.Collaborators)
 	contentBytes, _ := json.Marshal(selectedFile)
 	userlib.DatastoreSet(filekey, contentBytes)
+	newUserData, _ := json.Marshal(userdata)
+	userlib.DatastoreSet(getUserHash(userdata.Username), newUserData)
 	return nil
 }
 
@@ -339,6 +356,5 @@ func contains(s []string, str string) bool {
 			return true
 		}
 	}
-
 	return false
 }
