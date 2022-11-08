@@ -101,6 +101,10 @@ func someUsefulThings() {
 // (e.g. like the Username attribute) and methods (e.g. like the StoreFile method below).
 type User struct {
 	Username string
+	Password string
+	Files map[string]userlib.UUID
+	FilesByOriginalName map[string]string
+	OwnerByFile map[string]string
 
 	// You can add other attributes here if you want! But note that in order for attributes to
 	// be included when this struct is serialized to/from JSON, they must be capitalized.
@@ -110,18 +114,75 @@ type User struct {
 	// begins with a lowercase letter).
 }
 
+type File struct {
+	Content []byte
+	Owner string
+	Collaborators []string
+	CollaboratorsByInviter map[string]string
+	Invited []userlib.UUID
+	Data string
+}
+
+type Invitation struct {
+	Sender string
+	IntendedRecipient string
+	Filename string
+	OriginalOwner string
+	File userlib.UUID
+}
+
 // NOTE: The following methods have toy (insecure!) implementations.
 
+func NewUser() *User {
+	var user User
+	user.OwnerByFile = make(map[string]string)
+	user.FilesByOriginalName = make(map[string]string)
+	user.Files = make(map[string]userlib.UUID)
+	return &user
+}
+
+func NewFile() *File {
+	var file File
+	file.CollaboratorsByInviter = make(map[string]string)
+	return &file
+}
+
 func InitUser(username string, password string) (userdataptr *User, err error) {
-	var userdata User
+	var userdata User = *NewUser()
+	prevUUID := createUserUUID(username)
+	_, ok := userlib.DatastoreGet(prevUUID)
+	if ok != false {
+		fmt.Println("Username is already being used")
+		return nil, nil
+	} 
 	userdata.Username = username
+	userdata.Password = password
+	newUserID := createUserUUID(username)
+	data, _ := json.Marshal(userdata)
+	userlib.DatastoreSet(newUserID, data)
 	return &userdata, nil
 }
 
+func createUserUUID(username string) userlib.UUID {
+	prevUserHash := userlib.Hash([]byte(username))
+	deterministicUUID, _ := uuid.FromBytes(prevUserHash[:16])
+	return deterministicUUID
+}
+
 func GetUser(username string, password string) (userdataptr *User, err error) {
-	var userdata User
-	userdataptr = &userdata
-	return userdataptr, nil
+	prevUUID := createUserUUID(username)
+	data, ok := userlib.DatastoreGet(prevUUID)
+	if ok == false {
+		fmt.Println("Username is not registered")
+		return nil, nil
+	} 
+	var userData User
+	json.Unmarshal(data, &userData)
+	if userData.Password != password {
+		fmt.Println("Password is wrong")
+		return nil, nil
+	}
+	return &userData, nil
 }
 
 func (userdata *User) StoreFile(filename string, content []byte) (err error) {
@@ -129,7 +190,17 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 	if err != nil {
 		return err
 	}
-	contentBytes, err := json.Marshal(content)
+	userdata.Files[filename] = storageKey
+	var newFile File = *NewFile()
+	newFile.Content = content
+	newFile.Owner = userdata.Username
+	newFile.Collaborators = append(newFile.Collaborators, userdata.Username)
+	userdata.OwnerByFile[filename] = userdata.Username
+	userdata.FilesByOriginalName[filename] = filename
+	userdata.Files[filename] = storageKey 
+	fmt.Println(userdata.OwnerByFile)
+	fmt.Println(userdata.FilesByOriginalName)
+	contentBytes, err := json.Marshal(newFile)
 	if err != nil {
 		return err
 	}
@@ -138,11 +209,37 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 }
 
 func (userdata *User) AppendToFile(filename string, content []byte) error {
+	fileOwnerName := userdata.OwnerByFile[filename]
+	if fileOwnerName == "" {
+		fileOwnerName = userdata.Username
+	}
+	realFileName := userdata.FilesByOriginalName[filename]
+	storageKey, err := uuid.FromBytes(userlib.Hash([]byte(realFileName + fileOwnerName))[:16])
+	if err != nil {
+		return err
+	}
+	dataJSON, ok := userlib.DatastoreGet(storageKey)
+	if !ok {
+		return errors.New(strings.ToTitle("File not found"))
+	}
+	var fileData File
+	err = json.Unmarshal(dataJSON, &fileData)
+	fileData.Content = append(fileData.Content, content...)
+	if !contains(fileData.Collaborators, userdata.Username) {
+		return errors.New(strings.ToTitle("Not authorized"))
+	}
+	contentBytes, err := json.Marshal(fileData)
+	userlib.DatastoreSet(storageKey, contentBytes)
 	return nil
 }
 
 func (userdata *User) LoadFile(filename string) (content []byte, err error) {
-	storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
+	fileOwnerName := userdata.OwnerByFile[filename]
+	if fileOwnerName == "" {
+		fileOwnerName = userdata.Username
+	}
+	realFileName := userdata.FilesByOriginalName[filename]
+	storageKey, err := uuid.FromBytes(userlib.Hash([]byte(realFileName + fileOwnerName))[:16])
 	if err != nil {
 		return nil, err
 	}
@@ -150,19 +247,98 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 	if !ok {
 		return nil, errors.New(strings.ToTitle("file not found"))
 	}
-	err = json.Unmarshal(dataJSON, &content)
+	var foundFile File
+	err = json.Unmarshal(dataJSON, &foundFile)
+	content = foundFile.Content
+	if !contains(foundFile.Collaborators, userdata.Username) {
+		return nil, errors.New(strings.ToTitle("Not authorized"))
+	}
+	fmt.Println("here")
 	return content, err
 }
 
 func (userdata *User) CreateInvitation(filename string, recipientUsername string) (
 	invitationPtr uuid.UUID, err error) {
-	return
+	fileOwner := userdata.OwnerByFile[filename]
+	realFileName := userdata.FilesByOriginalName[filename]
+	filekey := userdata.Files[filename]
+	fmt.Println(filekey)
+	var newInvitation Invitation
+	newInvitation.Sender = userdata.Username
+	newInvitation.IntendedRecipient = recipientUsername
+	newInvitation.File = filekey
+	newInvitation.OriginalOwner = fileOwner
+	newInvitation.Filename = realFileName
+	invitationKey, _ := uuid.FromBytes(userlib.Hash([]byte(newInvitation.Sender + newInvitation.IntendedRecipient + filename))[:16])
+	data, _ := json.Marshal(newInvitation)
+	userlib.DatastoreSet(invitationKey, data)
+	return invitationKey, nil
 }
 
 func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid.UUID, filename string) error {
+	dataJSON, _ := userlib.DatastoreGet(invitationPtr)
+	var invitation Invitation 
+	json.Unmarshal(dataJSON, &invitation)
+	filekey := invitation.File
+	userdata.Files[filename] = filekey
+	fmt.Println(invitation)
+	userdata.FilesByOriginalName[filename] = invitation.Filename
+	// need to set the owner by file to the original owner
+	data, ok := userlib.DatastoreGet(filekey)
+	if !ok {
+		return errors.New(strings.ToTitle("Error Occured"))	
+	}
+	var selectedFile File
+	json.Unmarshal(data, &selectedFile)
+	selectedFile.Collaborators = append(selectedFile.Collaborators, userdata.Username)
+	selectedFile.CollaboratorsByInviter[userdata.Username] = senderUsername
+	userdata.OwnerByFile[filename] = selectedFile.Owner
+	contentBytes, _ := json.Marshal(selectedFile)
+	userlib.DatastoreSet(filekey, contentBytes)
 	return nil
 }
 
 func (userdata *User) RevokeAccess(filename string, recipientUsername string) error {
+	fileOwner := userdata.OwnerByFile[filename]
+	if fileOwner == "" {
+		fileOwner = userdata.Username
+	}
+	realFileName := userdata.FilesByOriginalName[filename]
+	filekey, _ := uuid.FromBytes(userlib.Hash([]byte(realFileName + fileOwner))[:16])
+	data, ok := userlib.DatastoreGet(filekey)
+	if !ok {
+		return errors.New(strings.ToTitle("Error Occured"))	
+	}
+	var selectedFile File
+	json.Unmarshal(data, &selectedFile)
+	for i, s := range selectedFile.Collaborators {
+		if s == recipientUsername {
+			selectedFile.Collaborators = append(selectedFile.Collaborators[:i], selectedFile.Collaborators[i+1:]...)
+		}
+	} 
+	var toBeRemoved []string
+	toBeRemoved = append(toBeRemoved, recipientUsername)
+	for len(toBeRemoved) > 0 {
+		for i, s := range selectedFile.Collaborators {
+			if selectedFile.CollaboratorsByInviter[s] == toBeRemoved[0] {
+				toBeRemoved = append(toBeRemoved, s)
+				selectedFile.Collaborators = append(selectedFile.Collaborators[:i], selectedFile.Collaborators[i+1:]...)
+			}
+		}
+		toBeRemoved = toBeRemoved[1:]
+	}
+	fmt.Println("collabs", selectedFile.Collaborators)
+	contentBytes, _ := json.Marshal(selectedFile)
+	userlib.DatastoreSet(filekey, contentBytes)
 	return nil
+}
+
+func contains(s []string, str string) bool {
+	for _, v := range s {
+		if v == str {
+			return true
+		}
+	}
+
+	return false
 }
